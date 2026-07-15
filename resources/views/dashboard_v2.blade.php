@@ -266,6 +266,39 @@
             font-weight: 700;
             color: #3498db;
         }
+
+        /* BCG coverage legend (Leaflet control) */
+        .bcg-legend {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px 12px;
+            border-radius: 6px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            font-size: 12px;
+            line-height: 1.5;
+            min-width: 140px;
+        }
+
+        .bcg-legend h6 {
+            margin: 0 0 6px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #2c3e50;
+        }
+
+        .bcg-legend-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 3px 0;
+        }
+
+        .bcg-legend-swatch {
+            width: 18px;
+            height: 12px;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
     </style>
 </head>
 
@@ -297,6 +330,12 @@
                 <button class="btn btn-sm btn-outline-warning me-2"
                     type="button" data-bs-toggle="modal" data-bs-target="#districtMapModal">
                     <i class="fas fa-file-import"></i> District Maps
+                </button>
+            </li>
+            <li class="nav-item">
+                <button class="btn btn-sm btn-outline-success me-2" id="bcgColorBtn"
+                    type="button" onclick="colorDistrictsByBcgCoverage()" title="Fetch target + BCG coverage and color districts">
+                    <i class="fas fa-palette"></i> Color BCG Coverage
                 </button>
             </li>
             <li class="nav-item dropdown">
@@ -350,7 +389,14 @@
                             <div class="sb-nav-link-icon"><i class="fas fa-layer-group"></i></div>
                             <span id="sideDistrictLabel">No shape loaded</span>
                         </a>
-                        <div class="sb-sidenav-menu-heading">District Maps</div>
+                        <div class="sb-sidenav-menu-heading">EPI Coverage</div>
+                        <a class="nav-link" href="#" onclick="colorDistrictsByBcgCoverage();return false;">
+                            <div class="sb-nav-link-icon"><i class="fas fa-syringe"></i></div>
+                            Color by BCG %
+                        </a>
+                        <div class="px-3 pb-2 text-white-50" style="font-size:11px" id="bcgColorStatus">
+                            Not loaded
+                        </div>
                         <!-- Populated dynamically by refreshDistrictMapSidebar() -->
                         <div id="sideDistrictMaps">
                             <a class="nav-link text-muted" href="#">
@@ -1355,13 +1401,7 @@
             };
 
             L.geoJSON(fc, {
-                style: feature => ({
-                    color: '#2c3e50',
-                    weight: 1.5,
-                    // Blue = district map built; grey = not built
-                    fillColor: feature.properties._built ? '#3498db' : '#95a5a6',
-                    fillOpacity: feature.properties._built ? 0.15 : 0.08
-                }),
+                style: feature => districtBaseStyle(feature.properties),
                 onEachFeature: (feature, layer) => {
                     const p = feature.properties;
                     const name = p._name || 'Unknown district';
@@ -1373,12 +1413,7 @@
                     layer.districtUuid = uuid;
                     layer.districtBuilt = built;
 
-                    // Tooltip shows name + quick status
-                    layer.bindTooltip(
-                        `<b>${name}</b><br><small>${built ? '✅ Map built' : '❌ Map not built'}</small>`, {
-                            sticky: true
-                        }
-                    );
+                    refreshDistrictLayerPresentation(layer);
 
                     // Popup shows full details
                     if (built && uuid) {
@@ -1442,19 +1477,17 @@
                         });
                     }
 
-                    const builtStyle = {
-                        fillColor: '#3498db',
-                        fillOpacity: 0.35,
-                        weight: 2
-                    };
-                    const defaultStyle = {
-                        fillColor: built ? '#3498db' : '#95a5a6',
-                        fillOpacity: built ? 0.15 : 0.08,
-                        weight: 1.5
-                    };
-
-                    layer.on('mouseover', () => layer.setStyle(builtStyle));
-                    layer.on('mouseout', () => layer.setStyle(defaultStyle));
+                    layer.on('mouseover', () => {
+                        const s = layer._baseStyle || districtBaseStyle(p);
+                        layer.setStyle({
+                            ...s,
+                            weight: 2.5,
+                            fillOpacity: Math.min(0.85, (s.fillOpacity || 0.4) + 0.2),
+                        });
+                    });
+                    layer.on('mouseout', () => {
+                        layer.setStyle(layer._baseStyle || districtBaseStyle(p));
+                    });
                 }
             }).addTo(districtsGroup);
 
@@ -2157,12 +2190,324 @@
                 </details>`;
         }
 
+        /* ── BCG coverage coloring ───────────────────────────────────────────────
+           Color districts by BCG coverage % of target (male+female):
+             <80% | 80–85% | 85–90% | 90–95% | >95%
+           ─────────────────────────────────────────────────────────────────────── */
+        const BCG_VACCINE_UID = 'x3aIDdpR65a';
+        const BCG_COVERAGE_COLORS = [
+            { test: p => p < 80, label: '<80 %', color: '#e74c3c' },
+            { test: p => p >= 80 && p < 85, label: '80–85 %', color: '#e67e22' },
+            { test: p => p >= 85 && p < 90, label: '85–90 %', color: '#f1c40f' },
+            { test: p => p >= 90 && p <= 95, label: '90–95 %', color: '#2ecc71' },
+            { test: p => p > 95, label: '>95 %', color: '#1e8449' },
+        ];
+        const BCG_NO_DATA_COLOR = '#bdc3c7';
+
+        /** @type {Record<string, { target?: object, coverage?: object }>} */
+        const epiDataStore = {};
+        let bcgColorMode = false;
+        let bcgColorYear = null;
+        let bcgLegendControl = null;
+
+        function chunkArray(arr, size) {
+            const chunks = [];
+            for (let i = 0; i < arr.length; i += size) {
+                chunks.push(arr.slice(i, i + size));
+            }
+            return chunks;
+        }
+
+        function bcgColorForPct(pct) {
+            if (pct == null || Number.isNaN(pct)) {
+                return BCG_NO_DATA_COLOR;
+            }
+            const band = BCG_COVERAGE_COLORS.find(b => b.test(pct));
+            return band ? band.color : BCG_NO_DATA_COLOR;
+        }
+
+        function bcgLabelForPct(pct) {
+            if (pct == null || Number.isNaN(pct)) {
+                return 'No data';
+            }
+            const band = BCG_COVERAGE_COLORS.find(b => b.test(pct));
+            return band ? band.label : 'No data';
+        }
+
+        function mergeEpiStore(uuid, partial) {
+            if (!epiDataStore[uuid]) {
+                epiDataStore[uuid] = {};
+            }
+            Object.assign(epiDataStore[uuid], partial);
+        }
+
+        function pickBcgYear(uuid) {
+            const stored = epiDataStore[uuid] || {};
+            const targetYears = Object.keys(stored.target?.child_0_to_11_month || {});
+            const coverageYears = Object.keys(stored.coverage?.child_0_to_11_month || {});
+            const common = targetYears.filter(y => coverageYears.includes(y)).sort();
+            if (!common.length) {
+                return null;
+            }
+            const preferred = bcgColorYear || String(new Date().getFullYear());
+            if (common.includes(preferred)) {
+                return preferred;
+            }
+            return common[common.length - 1];
+        }
+
+        /**
+         * BCG coverage % = (BCG male + female) / (target male + female) × 100
+         */
+        function computeBcgCoveragePct(uuid, year = null) {
+            const stored = epiDataStore[uuid];
+            if (!stored?.target || !stored?.coverage) {
+                return null;
+            }
+            const y = year || pickBcgYear(uuid);
+            if (!y) {
+                return null;
+            }
+
+            const target = stored.target.child_0_to_11_month?.[y];
+            if (!target) {
+                return null;
+            }
+            const targetTotal = (Number(target.male) || 0) + (Number(target.female) || 0);
+            if (targetTotal <= 0) {
+                return null;
+            }
+
+            const vaccines = stored.coverage.child_0_to_11_month?.[y]?.vaccine || [];
+            const bcg = vaccines.find(v => v.vaccine_uid === BCG_VACCINE_UID || v.vaccine_name === 'BCG');
+            if (!bcg) {
+                return null;
+            }
+            const covered = (Number(bcg.male) || 0) + (Number(bcg.female) || 0);
+            return Math.round((covered / targetTotal) * 10000) / 100;
+        }
+
+        function districtBaseStyle(props) {
+            const built = props._built;
+            const uuid = props._uuid;
+
+            if (bcgColorMode && uuid) {
+                const pct = computeBcgCoveragePct(uuid);
+                return {
+                    color: '#2c3e50',
+                    weight: 1.5,
+                    fillColor: bcgColorForPct(pct),
+                    fillOpacity: pct == null ? 0.25 : 0.65,
+                };
+            }
+
+            return {
+                color: '#2c3e50',
+                weight: 1.5,
+                fillColor: built ? '#3498db' : '#95a5a6',
+                fillOpacity: built ? 0.15 : 0.08,
+            };
+        }
+
+        function refreshDistrictLayerPresentation(layer) {
+            const name = layer.districtName || 'Unknown';
+            const built = layer.districtBuilt;
+            const uuid = layer.districtUuid;
+            const props = layer.feature?.properties || {
+                _built: built,
+                _uuid: uuid,
+            };
+
+            const style = districtBaseStyle(props);
+            layer._baseStyle = style;
+            layer.setStyle(style);
+
+            let tip = `<b>${name}</b>`;
+            if (bcgColorMode && uuid) {
+                const year = pickBcgYear(uuid);
+                const pct = computeBcgCoveragePct(uuid, year);
+                if (pct != null) {
+                    tip += `<br><small>BCG ${year}: <b>${pct}%</b> (${bcgLabelForPct(pct)})</small>`;
+                } else {
+                    tip += `<br><small>BCG: no data</small>`;
+                }
+            } else {
+                tip += `<br><small>${built ? '✅ Map built' : '❌ Map not built'}</small>`;
+            }
+
+            if (layer.getTooltip()) {
+                layer.setTooltipContent(tip);
+            } else {
+                layer.bindTooltip(tip, { sticky: true });
+            }
+        }
+
+        function applyBcgCoverageStylesToMap() {
+            districtsGroup.eachLayer(parent => {
+                if (parent.eachLayer) {
+                    parent.eachLayer(layer => refreshDistrictLayerPresentation(layer));
+                } else {
+                    refreshDistrictLayerPresentation(parent);
+                }
+            });
+            showBcgLegend();
+        }
+
+        function showBcgLegend() {
+            if (bcgLegendControl) {
+                map.removeControl(bcgLegendControl);
+            }
+            bcgLegendControl = L.control({ position: 'bottomleft' });
+            bcgLegendControl.onAdd = function () {
+                const div = L.DomUtil.create('div', 'bcg-legend');
+                const yearLabel = bcgColorYear ? ` (${bcgColorYear})` : '';
+                div.innerHTML = `<h6>BCG Coverage %${yearLabel}</h6>` +
+                    BCG_COVERAGE_COLORS.map(b =>
+                        `<div class="bcg-legend-row">
+                            <span class="bcg-legend-swatch" style="background:${b.color}"></span>
+                            <span>${b.label}</span>
+                        </div>`
+                    ).join('') +
+                    `<div class="bcg-legend-row">
+                        <span class="bcg-legend-swatch" style="background:${BCG_NO_DATA_COLOR}"></span>
+                        <span>No data</span>
+                    </div>`;
+                return div;
+            };
+            bcgLegendControl.addTo(map);
+        }
+
+        function setBcgStatus(text) {
+            const el = document.getElementById('bcgColorStatus');
+            if (el) {
+                el.textContent = text;
+            }
+        }
+
+        /** Yearly periods only — enough for BCG map coloring (much lighter than full coverage). */
+        function buildYearlyPeriods(startYear = 2024) {
+            const periods = [];
+            const currentYear = new Date().getFullYear();
+            for (let y = startYear; y <= currentYear; y++) {
+                periods.push(String(y));
+            }
+            return periods.join(';');
+        }
+
+        async function fetchBcgCoverage(areaUids) {
+            const bcg = VACCINE_MAPPING[BCG_VACCINE_UID];
+            const url = buildEpiUrl(
+                `${bcg.female};${bcg.male}`,
+                areaUids.join(';'),
+                buildYearlyPeriods(2024)
+            );
+            const data = await epiAnalyticsFetch(url);
+            return parseCoverageRows(data.rows || []);
+        }
+
+        async function fetchTargetForAllAreas(areaUids) {
+            const chunks = chunkArray(areaUids, 100);
+            const merged = {};
+            for (let i = 0; i < chunks.length; i++) {
+                const part = await fetchTarget(chunks[i]);
+                Object.assign(merged, part);
+                if (i < chunks.length - 1) {
+                    await new Promise(r => setTimeout(r, 5000));
+                }
+            }
+            return merged;
+        }
+
+        async function fetchBcgCoverageForAllAreas(areaUids) {
+            const chunks = chunkArray(areaUids, 100);
+            const merged = {};
+            for (let i = 0; i < chunks.length; i++) {
+                const part = await fetchBcgCoverage(chunks[i]);
+                Object.assign(merged, part);
+                if (i < chunks.length - 1) {
+                    await new Promise(r => setTimeout(r, 5000));
+                }
+            }
+            return merged;
+        }
+
+        function collectDistrictUuids() {
+            const uuids = [];
+            districtsGroup.eachLayer(parent => {
+                const layers = parent.eachLayer ? [] : [parent];
+                if (parent.eachLayer) {
+                    parent.eachLayer(l => layers.push(l));
+                }
+                layers.forEach(layer => {
+                    if (layer.districtUuid) {
+                        uuids.push(layer.districtUuid);
+                    }
+                });
+            });
+            return [...new Set(uuids)];
+        }
+
+        async function colorDistrictsByBcgCoverage() {
+            const uuids = collectDistrictUuids();
+            if (!uuids.length) {
+                setBcgStatus('No district UUIDs on map');
+                alert('No district UUIDs found. Upload district maps first.');
+                return;
+            }
+
+            const btn = document.getElementById('bcgColorBtn');
+            if (btn) {
+                btn.disabled = true;
+            }
+            setBcgStatus(`Fetching target for ${uuids.length} districts…`);
+
+            try {
+                const targets = await fetchTargetForAllAreas(uuids);
+                Object.entries(targets).forEach(([uuid, target]) => {
+                    mergeEpiStore(uuid, { target });
+                });
+
+                setBcgStatus(`Fetching BCG coverage for ${uuids.length} districts…`);
+                const coverage = await fetchBcgCoverageForAllAreas(uuids);
+                Object.entries(coverage).forEach(([uuid, cov]) => {
+                    mergeEpiStore(uuid, { coverage: cov });
+                });
+
+                bcgColorYear = String(new Date().getFullYear());
+                // Fall back if current year missing for most districts
+                const yearsWithData = uuids
+                    .map(u => pickBcgYear(u))
+                    .filter(Boolean);
+                if (yearsWithData.length && !yearsWithData.includes(bcgColorYear)) {
+                    bcgColorYear = yearsWithData.sort().pop();
+                }
+
+                bcgColorMode = true;
+                applyBcgCoverageStylesToMap();
+
+                const withPct = uuids.filter(u => computeBcgCoveragePct(u) != null).length;
+                setBcgStatus(`BCG ${bcgColorYear}: ${withPct}/${uuids.length} districts colored`);
+            } catch (err) {
+                console.error(err);
+                setBcgStatus('Failed: ' + (err.message || 'error'));
+                alert('Failed to color districts: ' + (err.message || err));
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                }
+            }
+        }
+
         async function pullTargetData(uuid, name) {
             openEpiPanel(uuid, name, 'target');
             renderLoading('targetDataContent', 'target data');
             try {
                 const data = await fetchTarget([uuid]);
+                mergeEpiStore(uuid, { target: data[uuid] || null });
                 renderTargetData(uuid, data);
+                if (bcgColorMode) {
+                    applyBcgCoverageStylesToMap();
+                }
             } catch (err) {
                 console.error(err);
                 renderError('targetDataContent', err.message || 'Failed to fetch target data.');
@@ -2174,7 +2519,11 @@
             renderLoading('coverageDataContent', 'coverage data');
             try {
                 const data = await fetchCoverage([uuid]);
+                mergeEpiStore(uuid, { coverage: data[uuid] || null });
                 renderCoverageData(uuid, data);
+                if (bcgColorMode) {
+                    applyBcgCoverageStylesToMap();
+                }
             } catch (err) {
                 console.error(err);
                 renderError('coverageDataContent', err.message || 'Failed to fetch coverage data.');
