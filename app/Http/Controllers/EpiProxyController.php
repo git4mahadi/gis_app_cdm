@@ -45,16 +45,60 @@ class EpiProxyController extends Controller
        ───────────────────────────────────────────────────────────────────── */
     public function analytics(Request $request)
     {
+        // Prefer explicit dx/ou/pe params (avoids PHP collapsing duplicate "dimension" keys).
+        // Fall back to raw QUERY_STRING for any other callers.
+        $dx = $request->query('dx');
+        $ou = $request->query('ou');
+        $pe = $request->query('pe');
+
+        if ($dx && $ou && $pe) {
+            $params = [
+                'dimension' => [
+                    'dx:'.$dx,
+                    'ou:'.$ou,
+                    'pe:'.$pe,
+                ],
+                'dataSet' => $request->query('dataSet', 'lyLU2wR22tC'),
+                'lastUpdated' => $request->query('lastUpdated'),
+                'showHierarchy' => $request->query('showHierarchy', 'false'),
+                'hierarchyMeta' => $request->query('hierarchyMeta', 'false'),
+                'includeMetadataDetails' => $request->query('includeMetadataDetails', 'true'),
+                'includeNumDen' => $request->query('includeNumDen', 'true'),
+                'skipRounding' => $request->query('skipRounding', 'false'),
+                'completedOnly' => $request->query('completedOnly', 'false'),
+                'outputIdScheme' => $request->query('outputIdScheme', 'UID'),
+            ];
+
+            // Guzzle encodes array values as dimension[0]=... by default.
+            // Build the DHIS2 query string manually instead.
+            $parts = [];
+            foreach ($params['dimension'] as $dim) {
+                $parts[] = 'dimension='.rawurlencode($dim);
+            }
+            unset($params['dimension']);
+            foreach ($params as $key => $value) {
+                if ($value === null || $value === '') {
+                    continue;
+                }
+                $parts[] = rawurlencode((string) $key).'='.rawurlencode((string) $value);
+            }
+            $url = self::EPI_BASE.'/analytics.json?'.implode('&', $parts);
+        } else {
+            // Preserve repeated dimension= keys from the raw server query string.
+            $query = (string) $request->server->get('QUERY_STRING', '');
+            $url = self::EPI_BASE.'/analytics.json'.($query !== '' ? '?'.$query : '');
+        }
+
         $response = Http::timeout(120)
             ->withHeaders([
-                'Authorization' => 'Basic ' . self::AUTH_TOKEN,
-                'Accept'        => 'application/json',
+                'Authorization' => 'Basic '.self::AUTH_TOKEN,
+                'Accept' => 'application/json',
             ])
-            ->get(self::EPI_BASE . '/analytics.json', $request->query());
+            ->get($url);
 
         return response($response->body(), $response->status())
             ->header('Content-Type', 'application/json')
-            ->header('X-EPI-Status', $response->status());
+            ->header('X-EPI-Status', (string) $response->status());
     }
 
     /* ─────────────────────────────────────────────────────────────────────
@@ -67,21 +111,21 @@ class EpiProxyController extends Controller
         try {
             $response = Http::timeout(10)
                 ->withHeaders([
-                    'Authorization' => 'Basic ' . self::AUTH_TOKEN,
-                    'Accept'        => 'application/json',
+                    'Authorization' => 'Basic '.self::AUTH_TOKEN,
+                    'Accept' => 'application/json',
                 ])
-                ->get(self::EPI_BASE . '/system/info');
+                ->get(self::EPI_BASE.'/system/info');
 
             return response()->json([
-                'status'  => $response->successful() ? 'ok' : 'error',
-                'code'    => $response->status(),
-                'message' => $response->successful() ? 'EPI Tracker reachable' : 'EPI Tracker returned ' . $response->status(),
+                'status' => $response->successful() ? 'ok' : 'error',
+                'code' => $response->status(),
+                'message' => $response->successful() ? 'EPI Tracker reachable' : 'EPI Tracker returned '.$response->status(),
             ]);
         } catch (\Throwable $e) {
             return response()->json([
-                'status'  => 'error',
-                'code'    => 0,
-                'message' => 'Could not reach EPI Tracker: ' . $e->getMessage(),
+                'status' => 'error',
+                'code' => 0,
+                'message' => 'Could not reach EPI Tracker: '.$e->getMessage(),
             ], 503);
         }
     }

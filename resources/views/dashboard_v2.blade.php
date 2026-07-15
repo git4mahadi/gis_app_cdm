@@ -1409,7 +1409,7 @@
                                         style="font-size:10px;padding:3px 8px;border:1px solid #8e44ad;
                                                border-radius:3px;background:#f5eef8;cursor:pointer;color:#7d3c98;
                                                text-align:left">
-                                        � Pull Coverage Data
+                                        🛡️ Pull Coverage Data
                                     </button>
                                 </div>
                             </div>`, {
@@ -1726,6 +1726,483 @@
 
             sidebar.innerHTML = items;
         }
+
+        /* ══════════════════════════════════════════════════════════════════
+           EPI TRACKER API — Target & Coverage Integration
+           Proxied through Laravel /epi/analytics to avoid CORS.
+           ══════════════════════════════════════════════════════════════════ */
+
+        const EPI_API = {
+            analyticsUrl: "{{ route('epi.analytics') }}",
+            healthUrl: "{{ route('epi.health') }}",
+            dataSet: 'lyLU2wR22tC',
+            timeout: 120000,
+            lastUpdatedHours: 24,
+        };
+
+        const TARGET_DATA_ELEMENTS = {
+            female: 'ECYFfDlmn6x.MViY8dENSwS',
+            male: 'ECYFfDlmn6x.JEskOTPddjb',
+        };
+
+        const VACCINE_MAPPING = {
+            'x3aIDdpR65a': { name: 'BCG', female: 'x3aIDdpR65a.MViY8dENSwS', male: 'x3aIDdpR65a.JEskOTPddjb' },
+            'HOq1Ax6xB19': { name: 'Penta - 1', female: 'HOq1Ax6xB19.MViY8dENSwS', male: 'HOq1Ax6xB19.JEskOTPddjb' },
+            'NCu55gLH6Te': { name: 'Penta - 2', female: 'NCu55gLH6Te.MViY8dENSwS', male: 'NCu55gLH6Te.JEskOTPddjb' },
+            'b3FM2S2oaAd': { name: 'Penta - 3', female: 'b3FM2S2oaAd.MViY8dENSwS', male: 'b3FM2S2oaAd.JEskOTPddjb' },
+            'xyVY5CmifZP': { name: 'MR - 1', female: 'xyVY5CmifZP.MViY8dENSwS', male: 'xyVY5CmifZP.JEskOTPddjb' },
+            'nHwxXPJziO2': { name: 'MR - 2', female: 'nHwxXPJziO2.MViY8dENSwS', male: 'nHwxXPJziO2.JEskOTPddjb' },
+        };
+
+        const DEMOGRAPHIC_DATA = {
+            population: { female: 'TLEJEfexUYw.MViY8dENSwS', male: 'TLEJEfexUYw.JEskOTPddjb' },
+            child_0_15_month: { female: 'Kffn1czgHoS.MViY8dENSwS', male: 'Kffn1czgHoS.JEskOTPddjb' },
+            child_0_11_month: { female: 'ECYFfDlmn6x.MViY8dENSwS', male: 'ECYFfDlmn6x.JEskOTPddjb' },
+            number_of_sessions_in_year: 'YluGjI7JcxN',
+            women_15_to_49: 'd8r3mR6oIuA',
+            ha_vaccinator_designation1: 'FkF8y84Z3OO',
+            ha_vaccinator_name1: 'VjRxNpL1CUb',
+            ha_vaccinator_designation2: 'QMQ70B2aztC',
+            ha_vaccinator_name2: 'cg8C5iBorBI',
+            supervisor1_designation: 'BoQ8rOAKFQW',
+            supervisor1_name: 'kUqReVELzVn',
+            epi_center_name_address: 'IRQHGfUcquk',
+            epi_center_implementer_name: 'KAkJhBdhdlG',
+            distance_from_cc_to_epi_center: 'iZ4zJfEOcES',
+            mode_of_transportation_distribution: 'vnb8vMsdceG',
+            mode_of_transportation_uhc: 'VK0ynF6yMfP',
+            time_to_reach_distribution_point: 'I6Fs0JFrTJJ',
+            time_to_reach_epi_center: 'DJigIkk23jm',
+            porter_name: 'DysowKIp2DD',
+            porter_mobile: 'lxTGXRL4mmL',
+            epi_center_type: 'MHLPf2fQJGh',
+        };
+
+        const STRING_DATA_ELEMENT_UIDS = [
+            'VjRxNpL1CUb', 'cg8C5iBorBI', 'kUqReVELzVn', 'DysowKIp2DD',
+            'FkF8y84Z3OO', 'QMQ70B2aztC', 'BoQ8rOAKFQW', 'IRQHGfUcquk',
+            'KAkJhBdhdlG', 'vnb8vMsdceG', 'VK0ynF6yMfP', 'MHLPf2fQJGh', 'lxTGXRL4mmL',
+        ];
+
+        function isNumeric(val) {
+            return val != null && val !== '' && !isNaN(val);
+        }
+
+        function getLastUpdatedTimestamp(hoursAgo = 24) {
+            const d = new Date(Date.now() - hoursAgo * 60 * 60 * 1000);
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.000`;
+        }
+
+        function getAllCoverageDataElements() {
+            const elements = [];
+            Object.values(VACCINE_MAPPING).forEach(v => {
+                elements.push(v.female, v.male);
+            });
+            Object.values(DEMOGRAPHIC_DATA).forEach(v => {
+                if (typeof v === 'object') {
+                    elements.push(...Object.values(v));
+                } else {
+                    elements.push(v);
+                }
+            });
+            return [...new Set(elements)];
+        }
+
+        function buildCoveragePeriods(startYear = 2024) {
+            const periods = [];
+            const currentYear = new Date().getFullYear();
+            const currentMonth = new Date().getMonth() + 1;
+            for (let y = startYear; y <= currentYear; y++) {
+                periods.push(String(y));
+                for (let m = 1; m <= 12; m++) {
+                    if (y === currentYear && m > currentMonth) {
+                        continue;
+                    }
+                    periods.push(`${y}${String(m).padStart(2, '0')}`);
+                }
+            }
+            return periods.join(';');
+        }
+
+        function buildTargetYears() {
+            const years = [];
+            const cy = new Date().getFullYear();
+            for (let i = 2024; i <= cy; i++) {
+                years.push(i);
+            }
+            return years;
+        }
+
+        function parseTargetRows(rows) {
+            const byArea = {};
+            rows.forEach(([dx, ou, pe, raw]) => {
+                if (!ou || !pe || !isNumeric(raw)) {
+                    return;
+                }
+                if (!byArea[ou]) {
+                    byArea[ou] = { child_0_to_11_month: {} };
+                }
+                if (!byArea[ou].child_0_to_11_month[pe]) {
+                    byArea[ou].child_0_to_11_month[pe] = { male: 0, female: 0 };
+                }
+                const val = Math.round(parseFloat(raw) * 100) / 100;
+                if (dx === TARGET_DATA_ELEMENTS.female) {
+                    byArea[ou].child_0_to_11_month[pe].female = val;
+                }
+                if (dx === TARGET_DATA_ELEMENTS.male) {
+                    byArea[ou].child_0_to_11_month[pe].male = val;
+                }
+            });
+            return byArea;
+        }
+
+        function mapDataElementsToVaccines(dataElements) {
+            const vaccines = [];
+            Object.entries(VACCINE_MAPPING).forEach(([uid, m]) => {
+                vaccines.push({
+                    vaccine_uid: uid,
+                    vaccine_name: m.name,
+                    male: dataElements[m.male] ?? null,
+                    female: dataElements[m.female] ?? null,
+                });
+            });
+            const demographics = {};
+            Object.entries(DEMOGRAPHIC_DATA).forEach(([key, val]) => {
+                if (typeof val === 'object') {
+                    demographics[key] = {
+                        female: dataElements[val.female] ?? null,
+                        male: dataElements[val.male] ?? null,
+                    };
+                } else {
+                    let v = dataElements[val] ?? null;
+                    if (STRING_DATA_ELEMENT_UIDS.includes(val) && v != null) {
+                        v = String(v);
+                    }
+                    demographics[key] = v;
+                }
+            });
+            return { vaccines, demographics };
+        }
+
+        function parseCoverageRows(rows) {
+            const organized = {};
+            rows.forEach(([dx, ou, pe, raw]) => {
+                if (!ou || !pe) {
+                    return;
+                }
+                let value;
+                if (STRING_DATA_ELEMENT_UIDS.includes(dx)) {
+                    value = raw != null ? String(raw) : null;
+                } else {
+                    if (raw == null || raw === '' || isNaN(raw)) {
+                        return;
+                    }
+                    value = Math.round(parseFloat(raw) * 100) / 100;
+                }
+                if (!organized[ou]) {
+                    organized[ou] = {};
+                }
+                if (!organized[ou][pe]) {
+                    organized[ou][pe] = {};
+                }
+                organized[ou][pe][dx] = value;
+            });
+
+            const result = {};
+            Object.entries(organized).forEach(([ou, periods]) => {
+                result[ou] = { child_0_to_11_month: {}, demographics: {} };
+                Object.entries(periods).forEach(([pe, dataElements]) => {
+                    const mapped = mapDataElementsToVaccines(dataElements);
+                    if (pe.length === 4) {
+                        result[ou].child_0_to_11_month[pe] = { vaccine: mapped.vaccines };
+                        result[ou].demographics[pe] = mapped.demographics;
+                    } else if (pe.length === 6) {
+                        const year = pe.slice(0, 4);
+                        const month = parseInt(pe.slice(4, 6), 10);
+                        if (!result[ou].child_0_to_11_month[year]) {
+                            result[ou].child_0_to_11_month[year] = { vaccine: [] };
+                        }
+                        if (!result[ou].child_0_to_11_month[year].months) {
+                            result[ou].child_0_to_11_month[year].months = {};
+                        }
+                        result[ou].child_0_to_11_month[year].months[month] = { vaccine: mapped.vaccines };
+                    }
+                });
+            });
+            return result;
+        }
+
+        function buildEpiCommonQuery() {
+            const params = new URLSearchParams({
+                dataSet: EPI_API.dataSet,
+                lastUpdated: getLastUpdatedTimestamp(EPI_API.lastUpdatedHours),
+                showHierarchy: 'false',
+                hierarchyMeta: 'false',
+                includeMetadataDetails: 'true',
+                includeNumDen: 'true',
+                skipRounding: 'false',
+                completedOnly: 'false',
+                outputIdScheme: 'UID',
+            });
+            return params;
+        }
+
+        /**
+         * Send dx/ou/pe as separate params. The Laravel proxy rebuilds the
+         * DHIS2 dimension=dx:…&dimension=ou:…&dimension=pe:… query so PHP
+         * never collapses repeated "dimension" keys.
+         */
+        function buildEpiUrl(dx, ou, pe) {
+            const params = buildEpiCommonQuery();
+            params.set('dx', dx);
+            params.set('ou', ou);
+            params.set('pe', pe);
+            return `${EPI_API.analyticsUrl}?${params.toString()}`;
+        }
+
+        async function epiAnalyticsFetch(url, maxRetries = 3) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), EPI_API.timeout);
+
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                try {
+                    const res = await fetch(url, {
+                        headers: { Accept: 'application/json' },
+                        signal: controller.signal,
+                    });
+
+                    if (res.status === 429 && attempt < maxRetries) {
+                        await new Promise(r => setTimeout(r, 30000 * Math.pow(2, attempt)));
+                        continue;
+                    }
+
+                    if (!res.ok) {
+                        let detail = '';
+                        try {
+                            const body = await res.json();
+                            detail = body.message ? `: ${body.message}` : '';
+                        } catch { /* ignore */ }
+                        throw new Error(`EPI API returned HTTP ${res.status}${detail}`);
+                    }
+
+                    clearTimeout(timer);
+                    return await res.json();
+                } catch (err) {
+                    if (attempt === maxRetries) {
+                        clearTimeout(timer);
+                        throw err;
+                    }
+                    if (err.name === 'AbortError') {
+                        clearTimeout(timer);
+                        throw new Error('EPI API request timed out');
+                    }
+                }
+            }
+        }
+
+        async function fetchTarget(areaUids, years = null) {
+            const y = years || buildTargetYears();
+            const url = buildEpiUrl(
+                `${TARGET_DATA_ELEMENTS.female};${TARGET_DATA_ELEMENTS.male}`,
+                areaUids.join(';'),
+                y.join(';')
+            );
+            const data = await epiAnalyticsFetch(url);
+            return parseTargetRows(data.rows || []);
+        }
+
+        async function fetchCoverage(areaUids) {
+            const url = buildEpiUrl(
+                getAllCoverageDataElements().join(';'),
+                areaUids.join(';'),
+                buildCoveragePeriods(2024)
+            );
+            const data = await epiAnalyticsFetch(url);
+            return parseCoverageRows(data.rows || []);
+        }
+
+        function openEpiPanel(uuid, name, activeTab = 'target') {
+            document.getElementById('epiPanelDistrictName').textContent = name;
+            document.getElementById('epiPanelUuid').textContent = uuid;
+            const tabId = activeTab === 'coverage' ? 'coverageTabBtn' : 'targetTabBtn';
+            bootstrap.Tab.getOrCreateInstance(document.getElementById(tabId)).show();
+            bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('epiDataPanel')).show();
+        }
+
+        function renderLoading(containerId, label) {
+            document.getElementById(containerId).innerHTML = `
+                <div class="text-center text-muted py-5">
+                    <i class="fas fa-circle-notch fa-spin fa-2x mb-3 d-block"></i>
+                    Fetching ${label}…
+                </div>`;
+        }
+
+        function renderError(containerId, message) {
+            document.getElementById(containerId).innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle me-1"></i>${message}
+                </div>`;
+        }
+
+        function renderTargetData(uuid, data) {
+            const area = data[uuid];
+            const container = document.getElementById('targetDataContent');
+            if (!area?.child_0_to_11_month || !Object.keys(area.child_0_to_11_month).length) {
+                container.innerHTML = `
+                    <div class="alert alert-warning">
+                        <i class="fas fa-info-circle me-1"></i>No target data found for this district UUID.
+                    </div>`;
+                return;
+            }
+
+            const years = Object.keys(area.child_0_to_11_month).sort();
+            const rows = years.map(year => {
+                const t = area.child_0_to_11_month[year];
+                return `<tr>
+                    <td><strong>${year}</strong></td>
+                    <td class="text-end">${t.male ?? '—'}</td>
+                    <td class="text-end">${t.female ?? '—'}</td>
+                    <td class="text-end">${(t.male ?? 0) + (t.female ?? 0)}</td>
+                </tr>`;
+            }).join('');
+
+            container.innerHTML = `
+                <p class="small text-muted mb-2">Child (0–11 month) targets by year</p>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered table-hover">
+                        <thead class="table-success">
+                            <tr><th>Year</th><th class="text-end">Male</th><th class="text-end">Female</th><th class="text-end">Total</th></tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+                <details class="mt-3">
+                    <summary class="small text-muted" style="cursor:pointer">Raw JSON</summary>
+                    <pre class="small bg-light p-2 mt-2 rounded" style="max-height:300px;overflow:auto">${JSON.stringify(area, null, 2)}</pre>
+                </details>`;
+        }
+
+        function renderCoverageData(uuid, data) {
+            const area = data[uuid];
+            const container = document.getElementById('coverageDataContent');
+            if (!area) {
+                container.innerHTML = `
+                    <div class="alert alert-warning">
+                        <i class="fas fa-info-circle me-1"></i>No coverage data found for this district UUID.
+                    </div>`;
+                return;
+            }
+
+            const years = Object.keys(area.child_0_to_11_month || {}).sort().reverse();
+            let html = '';
+
+            years.forEach(year => {
+                const yearData = area.child_0_to_11_month[year];
+                const vaccines = yearData?.vaccine || [];
+                const demo = area.demographics?.[year] || {};
+
+                const vaccineRows = vaccines.map(v => `
+                    <tr>
+                        <td>${v.vaccine_name}</td>
+                        <td class="text-end">${v.male ?? '—'}</td>
+                        <td class="text-end">${v.female ?? '—'}</td>
+                    </tr>`).join('');
+
+                const demoRows = Object.entries(demo).map(([key, val]) => {
+                    let display;
+                    if (val && typeof val === 'object' && ('male' in val || 'female' in val)) {
+                        display = `♂ ${val.male ?? '—'} / ♀ ${val.female ?? '—'}`;
+                    } else {
+                        display = val ?? '—';
+                    }
+                    return `<tr><td style="font-size:11px">${key.replace(/_/g, ' ')}</td><td style="font-size:11px">${display}</td></tr>`;
+                }).join('');
+
+                const monthCount = yearData?.months ? Object.keys(yearData.months).length : 0;
+
+                html += `
+                    <div class="card mb-3">
+                        <div class="card-header py-2"><strong>${year}</strong>
+                            ${monthCount ? `<span class="badge bg-secondary ms-2">${monthCount} months</span>` : ''}
+                        </div>
+                        <div class="card-body p-2">
+                            <p class="small fw-semibold mb-1">Vaccines (yearly)</p>
+                            <div class="table-responsive mb-2">
+                                <table class="table table-sm table-bordered mb-0" style="font-size:11px">
+                                    <thead class="table-light">
+                                        <tr><th>Vaccine</th><th class="text-end">Male</th><th class="text-end">Female</th></tr>
+                                    </thead>
+                                    <tbody>${vaccineRows || '<tr><td colspan="3" class="text-muted">No vaccine data</td></tr>'}</tbody>
+                                </table>
+                            </div>
+                            <p class="small fw-semibold mb-1">Demographics</p>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-bordered mb-0" style="font-size:11px">
+                                    <tbody>${demoRows || '<tr><td class="text-muted">No demographic data</td></tr>'}</tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>`;
+            });
+
+            if (!html) {
+                html = `<div class="alert alert-warning">No coverage records returned.</div>`;
+            }
+
+            container.innerHTML = html + `
+                <details class="mt-2">
+                    <summary class="small text-muted" style="cursor:pointer">Raw JSON</summary>
+                    <pre class="small bg-light p-2 mt-2 rounded" style="max-height:300px;overflow:auto">${JSON.stringify(area, null, 2)}</pre>
+                </details>`;
+        }
+
+        async function pullTargetData(uuid, name) {
+            openEpiPanel(uuid, name, 'target');
+            renderLoading('targetDataContent', 'target data');
+            try {
+                const data = await fetchTarget([uuid]);
+                renderTargetData(uuid, data);
+            } catch (err) {
+                console.error(err);
+                renderError('targetDataContent', err.message || 'Failed to fetch target data.');
+            }
+        }
+
+        async function pullCoverageData(uuid, name) {
+            openEpiPanel(uuid, name, 'coverage');
+            renderLoading('coverageDataContent', 'coverage data');
+            try {
+                const data = await fetchCoverage([uuid]);
+                renderCoverageData(uuid, data);
+            } catch (err) {
+                console.error(err);
+                renderError('coverageDataContent', err.message || 'Failed to fetch coverage data.');
+            }
+        }
+
+        async function checkEpiHealth() {
+            const badge = document.getElementById('epiHealthBadge');
+            if (!badge) {
+                return;
+            }
+            try {
+                const res = await fetch(EPI_API.healthUrl, { headers: { Accept: 'application/json' } });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    badge.className = 'badge bg-success';
+                    badge.innerHTML = '<i class="fas fa-check-circle me-1"></i>EPI API OK';
+                } else {
+                    badge.className = 'badge bg-danger';
+                    badge.innerHTML = '<i class="fas fa-times-circle me-1"></i>EPI Unreachable';
+                }
+            } catch {
+                badge.className = 'badge bg-danger';
+                badge.innerHTML = '<i class="fas fa-times-circle me-1"></i>EPI Unreachable';
+            }
+        }
+
+        checkEpiHealth();
 
         /* ══════════════════════════════════════════════════════════════════
            SHAPEFILE UPLOAD & AUTO-LOAD
